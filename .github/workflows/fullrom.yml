@@ -1,0 +1,90 @@
+# Full ROM build: HarmonyOS OTA + miatoll ROM -> flashable image set for curtana.
+# Produces the same output folder as running hmos2curtana.py locally, uploaded as an artifact.
+name: build full curtana rom
+
+on:
+  workflow_dispatch:
+    inputs:
+      ota_url:
+        description: "HarmonyOS full OTA (Pura 70)"
+        required: false
+        default: "http://update.dbankcdn.com/download/data/pub_13/HWHOTA_hota_900_9/c9/v3/fm2MH0XMR0m9EpxI0L2Zww/full/update_full_base.zip"
+      rom_url:
+        description: "miatoll ROM zip (source of firmware + audio configs)"
+        required: false
+        default: "https://mirrorbits.lineageos.org/full/miatoll/20261102/lineage-22.2-20261102-nightly-miatoll-signed.zip"
+      patches:
+        description: "patch list for hmos2curtana.py --patches"
+        required: false
+        default: "defaults"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache \
+            /usr/local/share/boost /usr/share/swift /usr/local/.ghcup
+          sudo apt-get clean
+          df -h /
+
+      - name: toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unzip curl python3-pip e2fsprogs
+          pip3 install --break-system-packages --quiet brotli
+          sh tools/fetch_tools.sh
+          ./tools/bin/extract.erofs --help >/dev/null 2>&1 || true
+          debugfs -V 2>&1 | head -1
+
+      - name: download OTA and ROM
+        env:
+          OTA_URL: ${{ inputs.ota_url }}
+          ROM_URL: ${{ inputs.rom_url }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/dl"
+          curl -L --retry 8 --retry-all-errors --retry-delay 5 -C - -o "$RUNNER_TEMP/dl/ota.zip" "$OTA_URL"
+          curl -L --retry 8 --retry-all-errors --retry-delay 5 -C - -o "$RUNNER_TEMP/dl/rom.zip" "$ROM_URL"
+          ls -l "$RUNNER_TEMP/dl"
+          df -h /
+
+      - name: convert (hmos2curtana)
+        env:
+          PATCHES: ${{ inputs.patches }}
+        run: |
+          python3 hmos2curtana.py \
+            --ota "$RUNNER_TEMP/dl/ota.zip" \
+            --curtana-rom "$RUNNER_TEMP/dl/rom.zip" \
+            --work "$RUNNER_TEMP/work" \
+            --out "$RUNNER_TEMP/out" \
+            --patches "$PATCHES"
+          df -h /
+          ls -l "$RUNNER_TEMP/out"
+
+      - name: build info
+        if: always()
+        run: |
+          test -f "$RUNNER_TEMP/out/BUILD_INFO.txt" && cat "$RUNNER_TEMP/out/BUILD_INFO.txt" || true
+
+      - name: free the OTA before uploading
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/dl" "$RUNNER_TEMP/work" || true
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: curtana-rom
+          retention-days: 5
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/out/*.img
+            ${{ runner.temp }}/out/*.sh
+            ${{ runner.temp }}/out/*.bat
+            ${{ runner.temp }}/out/BUILD_INFO.txt
